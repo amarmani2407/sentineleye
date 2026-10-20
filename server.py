@@ -19,6 +19,7 @@ import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from ultralytics import YOLO
+from anomaly_model import AnomalyDetector, available as anomaly_available
 
 # ======================= SETTINGS (change these) =======================
 PORT = 8000
@@ -42,7 +43,13 @@ AFTER_HOURS_START = 22       # 10 PM
 AFTER_HOURS_END = 6          # 6 AM
 
 # Alerts: seconds before the same person triggers the same alert type again
-COOLDOWNS = {"zone": 15, "loiter": 30, "fall": 20, "after": 60}
+COOLDOWNS = {"zone": 15, "loiter": 30, "fall": 20, "after": 60, "anomaly": 30}
+
+# Learned anomaly detector (Step 6). Needs anomaly_model.pt from train_anomaly.py
+ANOMALY_CHECK_SECONDS = 0.5     # how often the whole scene is scored
+ANOMALY_WINDOW = 6              # look at the last 6 scores...
+ANOMALY_NEEDED = 5              # ...and alert if at least 5 are above the limit
+ANOMALY_THRESHOLD_SCALE = 1.0   # below 1.0 = more sensitive, above 1.0 = less sensitive
 
 # Evidence
 CLIP_PRE_SECONDS = 4         # seconds of video saved from BEFORE the alert
@@ -256,6 +263,13 @@ def camera_loop():
     fps_est = 10.0
     last_t = time.time()
 
+    detector = AnomalyDetector() if anomaly_available() else None
+    anomaly_hits = deque(maxlen=ANOMALY_WINDOW)
+    anomaly_score = 0.0
+    last_score_t = 0.0
+    if detector:
+        print("Learned anomaly detector: ON")
+
     while not stop_event.is_set():
         ok, frame = cap.read()
         if not ok:
@@ -284,6 +298,15 @@ def camera_loop():
 
         candidates = []   # (kind, person id, message) found in this frame
         seen = set()
+
+        # Learned detector: is the whole scene unusual compared with normal footage?
+        if detector is not None and now - last_score_t >= ANOMALY_CHECK_SECONDS:
+            last_score_t = now
+            anomaly_score = detector.score(frame)
+            anomaly_hits.append(anomaly_score > detector.threshold * ANOMALY_THRESHOLD_SCALE)
+        if (detector is not None and len(anomaly_hits) == ANOMALY_WINDOW
+                and sum(anomaly_hits) >= ANOMALY_NEEDED):
+            candidates.append(("anomaly", 0, f"Unusual scene detected (score {anomaly_score:.4f})"))
 
         if r.boxes.id is not None and r.keypoints is not None:
             ids = r.boxes.id.int().cpu().tolist()
@@ -346,6 +369,10 @@ def camera_loop():
             cv2.rectangle(view, (0, 0), (w, 36), (0, 0, 255), -1)
             cv2.putText(view, "ALERT: " + ", ".join(kinds), (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        if detector is not None:
+            limit = detector.threshold * ANOMALY_THRESHOLD_SCALE
+            cv2.putText(view, f"Scene score {anomaly_score:.4f} / limit {limit:.4f}", (10, h - 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         cv2.putText(view, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), (10, h - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
@@ -601,7 +628,7 @@ input{width:100%;padding:11px;border-radius:8px;border:1px solid var(--border);
 .tag{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:99px;
   margin-bottom:4px;color:#fff;background:#64748b}
 .tag.zone{background:#d64545}.tag.fall{background:#b3261e}
-.tag.loiter{background:#d97706}.tag.after{background:#6d4fc2}
+.tag.loiter{background:#d97706}.tag.after{background:#6d4fc2}.tag.anomaly{background:#0f766e}
 </style>
 """
 
@@ -668,7 +695,7 @@ DASH_HTML = """<!doctype html><html><head><meta charset="utf-8">
   </div>
 </div>
 <script>
-const KIND = {zone:'Restricted zone', loiter:'Loitering', fall:'Fall', after:'After-hours'};
+const KIND = {zone:'Restricted zone', loiter:'Loitering', fall:'Fall', after:'After-hours', anomaly:'Unusual scene'};
 let lastSig = '';
 
 async function poll(){
@@ -761,5 +788,6 @@ if __name__ == "__main__":
     print(f" On other devices (same Wi-Fi): http://{ip}:{PORT}")
     print(f" ACCESS KEY     : {ACCESS_KEY}")
     print(f" Telegram alerts: {'ON' if TELEGRAM else 'off (optional)'}")
+    print(f" Learned anomaly model: {'ON' if anomaly_available() else 'not trained yet (optional)'}")
     print("=" * 52)
     uvicorn.run(app, host="0.0.0.0", port=PORT)

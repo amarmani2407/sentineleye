@@ -4,3 +4,6 @@ access_key.txt
 evidence/
 events.db
 telegram.txt
+normal_frames.npy
+anomaly_model.pt
+anomaly_threshold.json
