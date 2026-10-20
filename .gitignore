@@ -1,3 +1,6 @@
 venv/
 access_key.txt
 *.pt
+evidence/
+events.db
+telegram.txt
