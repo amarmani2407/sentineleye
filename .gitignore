@@ -1,6 +1,7 @@
 venv/
 access_key.txt
 *.pt
+*.npy
 evidence/
 events.db
 telegram.txt
